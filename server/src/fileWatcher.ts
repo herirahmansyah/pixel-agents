@@ -1039,8 +1039,7 @@ export function adoptExternalSessionFromHook(
     knownJsonlFiles.add(transcriptPath);
     const projectDir = path.dirname(transcriptPath);
     const directoryName =
-      directoryNameResolver?.({ cwd, projectDir }) ??
-      directoryNameFromProjectDir(path.basename(projectDir));
+      directoryNameResolver?.({ cwd, projectDir }) ?? path.basename(transcriptPath, '.jsonl');
 
     adoptExternalSession(
       transcriptPath,
@@ -1069,8 +1068,7 @@ export function adoptExternalSessionFromHook(
   } else {
     // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
     const id = nextAgentIdRef.current++;
-    const directoryName =
-      directoryNameResolver?.({ cwd }) ?? (cwd ? path.basename(cwd) : undefined);
+    const directoryName = directoryNameResolver?.({ cwd }) ?? sessionId;
     const agent = createAgentState({
       id,
       sessionId,
@@ -1145,7 +1143,7 @@ function adoptExternalSession(
     jsonlFile,
     fileOffset,
     lastDataAt: Date.now(),
-    directoryName,
+    directoryName: directoryName ?? path.basename(jsonlFile, '.jsonl'),
   });
 
   assignPaletteIfNeeded(agent, agents);
@@ -1373,7 +1371,9 @@ export function scanExternalDir(
     }
 
     knownJsonlFiles.add(file);
-    console.log(`[Pixel Agents] Watcher: detected external session ${path.basename(file)}`);
+    console.log(
+      `[Pixel Agents] Watcher: detected external session ${path.basename(file)} (${path.basename(file, '.jsonl')})`,
+    );
     adoptExternalSession(
       file,
       projectDir,
@@ -1386,12 +1386,6 @@ export function scanExternalDir(
       persistAgents,
     );
   }
-}
-
-/** Derive a readable Directory name from the Claude project dir hash. */
-function directoryNameFromProjectDir(dirName: string): string {
-  const parts = dirName.replace(/^-+/, '').split('-');
-  return parts[parts.length - 1] || dirName;
 }
 
 /** Scan every session root the active provider exposes for active sessions
@@ -1457,8 +1451,7 @@ function scanGlobalProjectDirs(
       }
 
       const directoryName =
-        directoryNameResolver?.({ projectDir: dirPath }) ??
-        directoryNameFromProjectDir(path.basename(dirPath));
+        directoryNameResolver?.({ projectDir: dirPath }) ?? path.basename(file, '.jsonl');
       knownJsonlFiles.add(file);
       console.log(
         `[Pixel Agents] Watcher: detected global session ${path.basename(file)} (${directoryName})`,
