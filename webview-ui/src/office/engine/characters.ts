@@ -86,6 +86,8 @@ export function createCharacter(
     matrixEffectSeeds: [],
     contextTokens: 0,
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+    loungeSeatId: null,
+    destinationSeatId: null,
   };
 }
 
@@ -96,6 +98,7 @@ export function updateCharacter(
   seats: Map<string, Seat>,
   tileMap: TileTypeVal[][],
   blockedTiles: Set<string>,
+  occupied: ReadonlySet<string> = new Set(),
 ): void {
   ch.frameTimer += dt;
 
@@ -111,7 +114,13 @@ export function updateCharacter(
           ch.seatTimer -= dt;
           break;
         }
-        ch.seatTimer = 0; // clear sentinel
+        ch.seatTimer = 0;
+        if (ch.loungeSeatId) {
+          const lounge = seats.get(ch.loungeSeatId);
+          if (lounge && ch.tileCol === lounge.seatCol && ch.tileRow === lounge.seatRow) {
+            break;
+          }
+        }
         ch.state = CharacterState.IDLE;
         ch.frame = 0;
         ch.frameTimer = 0;
@@ -125,7 +134,17 @@ export function updateCharacter(
     case CharacterState.IDLE: {
       // No idle animation — static pose
       ch.frame = 0;
-      if (ch.seatTimer < 0) ch.seatTimer = 0; // clear turn-end sentinel
+      if (ch.seatTimer < 0) ch.seatTimer = 0;
+      if (!ch.isActive && ch.loungeSeatId) {
+        const lounge = seats.get(ch.loungeSeatId);
+        if (lounge && ch.tileCol === lounge.seatCol && ch.tileRow === lounge.seatRow) {
+          ch.state = CharacterState.TYPE;
+          ch.dir = lounge.facingDir;
+          ch.frame = 0;
+          ch.frameTimer = 0;
+          break;
+        }
+      }
       // If became active, pathfind to seat
       if (ch.isActive) {
         if (!ch.seatId) {
@@ -223,6 +242,19 @@ export function updateCharacter(
         ch.x = center.x;
         ch.y = center.y;
 
+        const destination = ch.destinationSeatId ? seats.get(ch.destinationSeatId) : null;
+        if (destination) {
+          if (ch.tileCol === destination.seatCol && ch.tileRow === destination.seatRow) {
+            ch.state = CharacterState.TYPE;
+            ch.dir = destination.facingDir;
+            ch.destinationSeatId = null;
+          } else {
+            ch.state = CharacterState.IDLE;
+          }
+          ch.frame = 0;
+          ch.frameTimer = 0;
+          break;
+        }
         if (ch.isActive) {
           if (!ch.seatId) {
             // No seat — type in place
@@ -270,6 +302,17 @@ export function updateCharacter(
 
       // Move toward next tile in path
       const nextTile = ch.path[0];
+      if (occupied.has(`${nextTile.col},${nextTile.row}`)) {
+        const end = ch.path[ch.path.length - 1];
+        const newPath = findPath(ch.tileCol, ch.tileRow, end.col, end.row, tileMap, blockedTiles, occupied);
+        if (newPath.length === 0) {
+          ch.frame = 0;
+          ch.frameTimer = 0;
+          break;
+        }
+        ch.path = newPath;
+        ch.moveProgress = 0;
+      }
       ch.dir = directionBetween(ch.tileCol, ch.tileRow, nextTile.col, nextTile.row);
 
       ch.moveProgress += (WALK_SPEED_PX_PER_SEC / TILE_SIZE) * dt;
@@ -291,7 +334,7 @@ export function updateCharacter(
       }
 
       // If became active while wandering, repath to seat
-      if (ch.isActive && ch.seatId) {
+      if (ch.isActive && ch.seatId && !ch.destinationSeatId) {
         const seat = seats.get(ch.seatId);
         if (seat) {
           const lastStep = ch.path[ch.path.length - 1];

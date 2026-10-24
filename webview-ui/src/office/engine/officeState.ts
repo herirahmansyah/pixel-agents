@@ -31,6 +31,7 @@ import type {
   Character,
   FurnitureInstance,
   OfficeLayout,
+  OfficeTarget,
   Pet,
   PlacedFurniture,
   PlacedPet,
@@ -40,6 +41,7 @@ import type {
 import { CharacterState, Direction, PetState, TILE_SIZE } from '../types.js';
 import { createCharacter, updateCharacter } from './characters.js';
 import { advanceMatrixEffect, startMatrixEffect } from './matrixEffectState.js';
+import { findOfficePath, LOUNGE_TARGETS, WORKSPACE_SEATS } from './office-world.js';
 import { createPet, updatePet } from './petEntity.js';
 import { anchorTile, closestFreeSeat } from './seatPlacement.js';
 
@@ -86,6 +88,8 @@ export class OfficeState {
   subagentIdMap: Map<string, number> = new Map();
   /** Reverse lookup: sub-agent character ID → parent info */
   subagentMeta: Map<number, { parentAgentId: number; parentToolId: string }> = new Map();
+  /** Lounge seat uid → agent currently waiting there. */
+  loungeReservations: Map<string, number> = new Map();
   private nextSubagentId = -1;
 
   /**
@@ -141,6 +145,13 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(layout.furniture);
     this.rebuildFurnitureInstances();
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
+    this.loungeReservations.clear();
+    for (const ch of this.characters.values()) {
+      ch.loungeSeatId = null;
+      ch.destinationSeatId = null;
+      ch.path = [];
+      ch.moveProgress = 0;
+    }
 
     // Shift character positions when grid expands left/up
     if (shift && (shift.col !== 0 || shift.row !== 0)) {
@@ -380,13 +391,15 @@ export class OfficeState {
       if (!seat.assigned) freeSeats.push(uid);
     }
     if (freeSeats.length === 0) return null;
+    const workspaceFree = freeSeats.filter((uid) => this.seats.get(uid)!.kind === WORKSPACE_SEATS);
+    const candidateSeats = workspaceFree.length > 0 ? workspaceFree : freeSeats;
 
     const areaLabels = directoryName ? this.areaMappings[directoryName] : undefined;
 
     // Stage 1 — in-area seats for the Directory's mapped Area labels.
     if (areaLabels && areaLabels.length > 0) {
       const wanted = new Set(areaLabels);
-      const inArea = freeSeats.filter((uid) => {
+      const inArea = candidateSeats.filter((uid) => {
         const label = this.seatZone(uid);
         return label !== null && wanted.has(label);
       });
@@ -395,12 +408,12 @@ export class OfficeState {
     }
 
     // Stage 2 — unzoned seats (no area label, or layout has no areas at all).
-    const unzoned = freeSeats.filter((uid) => this.seatZone(uid) === null);
+    const unzoned = candidateSeats.filter((uid) => this.seatZone(uid) === null);
     const pick2 = this.pickFromSeats(unzoned, electronicsTiles);
     if (pick2) return pick2;
 
     // Stage 3 — any free seat.
-    return this.pickFromSeats(freeSeats, electronicsTiles);
+    return this.pickFromSeats(candidateSeats, electronicsTiles);
   }
 
   /** Closest walkable tile to (col,row) not occupied by another character, or null. */
@@ -595,6 +608,7 @@ export class OfficeState {
       const seat = this.seats.get(ch.seatId);
       if (seat) seat.assigned = false;
     }
+    this.releaseLoungeReservation(ch);
     if (this.selectedAgentId === id) this.selectedAgentId = null;
     if (this.cameraFollowId === id) this.cameraFollowId = null;
     // Start despawn animation instead of immediate delete
@@ -614,6 +628,7 @@ export class OfficeState {
   reassignSeat(agentId: number, seatId: string): void {
     const ch = this.characters.get(agentId);
     if (!ch) return;
+    this.releaseLoungeReservation(ch);
     // Unassign old seat
     if (ch.seatId) {
       const old = this.seats.get(ch.seatId);
@@ -836,6 +851,156 @@ export class OfficeState {
         ch.moveProgress = 0;
       }
       this.rebuildFurnitureInstances();
+    }
+  }
+
+  setAgentActivity(id: number, target: OfficeTarget): void {
+    const ch = this.characters.get(id);
+    if (!ch || ch.isSubagent) return;
+
+    if (target === LOUNGE_TARGETS) {
+      const existing = ch.loungeSeatId ? this.seats.get(ch.loungeSeatId) : null;
+      if (!existing || existing.kind !== LOUNGE_TARGETS || !existing.assigned) {
+        this.releaseLoungeReservation(ch);
+        const seat = this.selectLoungeSeat(ch);
+        if (!seat) return;
+        ch.loungeSeatId = seat.uid;
+        seat.assigned = true;
+        this.loungeReservations.set(seat.uid, id);
+        this.startSeatTransition(ch, seat);
+      } else {
+        this.startSeatTransition(ch, existing);
+      }
+      return;
+    }
+
+    this.releaseLoungeReservation(ch);
+    let seat = ch.seatId ? this.seats.get(ch.seatId) : null;
+    if (!seat || seat.kind !== WORKSPACE_SEATS) {
+      seat = this.findFreeWorkspaceSeat(ch);
+      if (!seat) return;
+    }
+    this.startSeatTransition(ch, seat);
+  }
+
+  private releaseLoungeReservation(ch: Character): void {
+    if (!ch.loungeSeatId) return;
+    const seat = this.seats.get(ch.loungeSeatId);
+    if (seat && this.loungeReservations.get(ch.loungeSeatId) === ch.id) {
+      seat.assigned = false;
+    }
+    this.loungeReservations.delete(ch.loungeSeatId);
+    ch.loungeSeatId = null;
+  }
+
+  private selectLoungeSeat(ch: Character): Seat | null {
+    const occupied = this.characterOccupiedTiles(ch.id);
+    let best: Seat | null = null;
+    let bestPath: number = Infinity;
+
+    for (const [uid, seat] of this.seats) {
+      if (seat.kind !== LOUNGE_TARGETS) continue;
+      if (seat.assigned) continue;
+      if (this.loungeReservations.get(uid) !== undefined && this.loungeReservations.get(uid) !== ch.id) continue;
+      if (occupied.has(`${seat.seatCol},${seat.seatRow}`)) continue;
+
+      const path = this.withTilesUnblocked([`${seat.seatCol},${seat.seatRow}`], () =>
+        findOfficePath(
+          { col: ch.tileCol, row: ch.tileRow },
+          { col: seat.seatCol, row: seat.seatRow },
+          this.tileMap,
+          this.blockedTiles,
+          occupied,
+        ),
+      );
+
+      const alreadyThere = ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
+      const pathLength = alreadyThere ? 0 : path.length;
+      if (!alreadyThere && path.length === 0) continue;
+      if (pathLength < bestPath) {
+        best = seat;
+        bestPath = pathLength;
+      }
+    }
+    return best;
+  }
+
+  private findFreeWorkspaceSeat(ch: Character): Seat | null {
+    const occupied = this.characterOccupiedTiles(ch.id);
+    let best: Seat | null = null;
+    let bestDist = Infinity;
+
+    for (const [uid, seat] of this.seats) {
+      if (seat.kind !== WORKSPACE_SEATS) continue;
+      if (seat.assigned) continue;
+      if (this.loungeReservations.get(uid) !== undefined) continue;
+      if (occupied.has(`${seat.seatCol},${seat.seatRow}`)) continue;
+      const dist = Math.abs(seat.seatCol - ch.tileCol) + Math.abs(seat.seatRow - ch.tileRow);
+      if (dist < bestDist) {
+        best = seat;
+        bestDist = dist;
+      }
+    }
+    return best;
+  }
+
+  private startSeatTransition(ch: Character, seat: Seat): void {
+    ch.destinationSeatId = seat.uid;
+    const occupied = this.characterOccupiedTiles(ch.id);
+    const path = this.withTilesUnblocked(
+      [`${seat.seatCol},${seat.seatRow}`],
+      () =>
+        findOfficePath(
+          { col: ch.tileCol, row: ch.tileRow },
+          { col: seat.seatCol, row: seat.seatRow },
+          this.tileMap,
+          this.blockedTiles,
+          occupied,
+        ),
+    );
+
+    if (ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
+      ch.path = [];
+      ch.moveProgress = 0;
+      ch.state = CharacterState.TYPE;
+      ch.dir = seat.facingDir;
+      ch.frame = 0;
+      ch.frameTimer = 0;
+      ch.destinationSeatId = null;
+      return;
+    }
+
+    if (path.length === 0) {
+      ch.destinationSeatId = null;
+      return;
+    }
+
+    ch.path = path;
+    ch.moveProgress = 0;
+    ch.state = CharacterState.WALK;
+    ch.frame = 0;
+    ch.frameTimer = 0;
+  }
+
+  private characterOccupiedTiles(excludeId: number): Set<string> {
+    const occupied = new Set<string>();
+    for (const [id, ch] of this.characters) {
+      if (id === excludeId) continue;
+      occupied.add(`${ch.tileCol},${ch.tileRow}`);
+    }
+    return occupied;
+  }
+
+  private withTilesUnblocked<T>(keys: string[], fn: () => T): T {
+    for (const key of keys) {
+      this.blockedTiles.delete(key);
+    }
+    try {
+      return fn();
+    } finally {
+      for (const key of keys) {
+        this.blockedTiles.add(key);
+      }
     }
   }
 
@@ -1138,6 +1303,7 @@ export class OfficeState {
     }
 
     const toDelete: number[] = [];
+    const occupied = this.characterOccupiedTiles(-1);
     for (const ch of this.characters.values()) {
       const effect = advanceMatrixEffect(ch, dt);
       if (effect !== 'none') {
@@ -1145,10 +1311,28 @@ export class OfficeState {
         continue; // skip normal FSM while the effect is (or just was) active
       }
 
-      // Temporarily unblock own seat so character can pathfind to it
-      this.withOwnSeatUnblocked(ch, () =>
-        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
+      const oldKey = `${ch.tileCol},${ch.tileRow}`;
+      const unblockKeys: string[] = [];
+      if (ch.seatId) {
+        const seat = this.seats.get(ch.seatId);
+        if (seat) unblockKeys.push(`${seat.seatCol},${seat.seatRow}`);
+      }
+      if (ch.loungeSeatId) {
+        const seat = this.seats.get(ch.loungeSeatId);
+        if (seat) unblockKeys.push(`${seat.seatCol},${seat.seatRow}`);
+      }
+      if (ch.destinationSeatId) {
+        const seat = this.seats.get(ch.destinationSeatId);
+        if (seat) unblockKeys.push(`${seat.seatCol},${seat.seatRow}`);
+      }
+
+      this.withTilesUnblocked(unblockKeys, () =>
+        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles, occupied),
       );
+
+      const newKey = `${ch.tileCol},${ch.tileRow}`;
+      occupied.delete(oldKey);
+      occupied.add(newKey);
 
       // Tick bubble timer for waiting bubbles
       if (ch.bubbleType === 'waiting') {

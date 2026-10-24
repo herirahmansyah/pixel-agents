@@ -41,6 +41,8 @@ export const Direction = {
 } as const;
 export type Direction = (typeof Direction)[keyof typeof Direction];
 
+export type OfficeTarget = 'workspace' | 'lounge';
+
 /** 2D array of hex color strings: '' = transparent, '#RRGGBB' = opaque, '#RRGGBBAA' = semi-transparent. [row][col] */
 export type SpriteData = string[][];
 
@@ -54,6 +56,7 @@ export interface Seat {
   /** Direction character faces when sitting (toward adjacent desk) */
   facingDir: Direction;
   assigned: boolean;
+  kind: OfficeTarget;
 }
 
 export interface FurnitureInstance {
@@ -213,6 +216,10 @@ export interface Character {
   bubbleTimer: number;
   /** Timer to stay seated while inactive after seat reassignment (counts down to 0) */
   seatTimer: number;
+  /** Transient lounge seat claimed while the agent is waiting. */
+  loungeSeatId: string | null;
+  /** Current transition destination seat. */
+  destinationSeatId: string | null;
   /** Whether this character represents a sub-agent (spawned by Task tool) */
   isSubagent: boolean;
   /** Parent agent ID if this is a sub-agent, null otherwise */

@@ -4,6 +4,7 @@ import type { HooksConsentRequest } from '../../../core/src/messages.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
 import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
 import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
+import { LOUNGE_TARGETS, WORKSPACE_SEATS } from '../office/engine/office-world.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../office/engine/renderer.js';
 import { setFloorSprites } from '../office/floorTiles.js';
@@ -570,6 +571,7 @@ export function useExtensionMessages(
           return { ...prev, [id]: awaiting };
         });
         os.setAgentActive(id, status === 'active');
+        os.setAgentActivity(id, status === 'active' ? WORKSPACE_SEATS : LOUNGE_TARGETS);
         if (status === 'waiting') {
           os.showWaitingBubble(id, msg.awaitingInput === true);
           playDoneSound();

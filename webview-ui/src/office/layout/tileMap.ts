@@ -1,4 +1,4 @@
-import { TileType } from '../types.js';
+import { TileType, type TileType as TileTypeVal } from '../types.js';
 
 /** Check if a tile is walkable (floor, carpet, or doorway, and not blocked by furniture) */
 export function isWalkable(
@@ -34,14 +34,17 @@ export function getWalkableTiles(
   return tiles;
 }
 
+export const EMPTY_OCCUPIED: ReadonlySet<string> = Object.freeze(new Set<string>());
+
 /** BFS pathfinding on 4-connected grid (no diagonals). Returns path excluding start, including end. */
 export function findPath(
   startCol: number,
   startRow: number,
   endCol: number,
   endRow: number,
-  tileMap: TileType[][],
+  tileMap: TileTypeVal[][],
   blockedTiles: Set<string>,
+  occupied: ReadonlySet<string> = EMPTY_OCCUPIED,
 ): Array<{ col: number; row: number }> {
   if (startCol === endCol && startRow === endRow) return [];
 
@@ -51,9 +54,12 @@ export function findPath(
 
   // End must be walkable (or be a chair tile which may be adjacent to desk)
   // We allow the end tile even if it's not strictly walkable for chair positions
+  if (occupied.has(endKey)) {
+    return [];
+  }
+
   const endWalkable = isWalkable(endCol, endRow, tileMap, blockedTiles);
   if (!endWalkable) {
-    // If the end is a desk tile, we still can't path there
     return [];
   }
 
@@ -92,7 +98,7 @@ export function findPath(
       const nk = key(nc, nr);
 
       if (visited.has(nk)) continue;
-      if (!isWalkable(nc, nr, tileMap, blockedTiles)) continue;
+      if (!isWalkable(nc, nr, tileMap, blockedTiles) || occupied.has(nk)) continue;
 
       visited.add(nk);
       parent.set(nk, currKey);

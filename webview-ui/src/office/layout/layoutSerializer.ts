@@ -1,5 +1,6 @@
 import type { ColorValue } from '../../components/ui/types.js';
 import { getColorizedSprite } from '../colorize.js';
+import { LOUNGE_TARGETS, WORKSPACE_SEATS } from '../engine/office-world.js';
 import type {
   FurnitureInstance,
   OfficeLayout,
@@ -7,6 +8,7 @@ import type {
   Seat,
   TileType as TileTypeVal,
 } from '../types.js';
+import type { OfficeTarget } from '../types.js';
 import { DEFAULT_COLS, DEFAULT_ROWS, Direction, TILE_SIZE, TileType } from '../types.js';
 import { getCatalogEntry, getOrientationInGroup } from './furnitureCatalog.js';
 
@@ -219,12 +221,14 @@ export function layoutToSeats(furniture: PlacedFurniture[]): Map<string, Seat> {
 
         // First seat uses chair uid (backward compat), subsequent use uid:N
         const seatUid = seatCount === 0 ? item.uid : `${item.uid}:${seatCount}`;
+        const kind: OfficeTarget = item.type.startsWith('SOFA_') ? LOUNGE_TARGETS : WORKSPACE_SEATS;
         seats.set(seatUid, {
           uid: seatUid,
           seatCol: tileCol,
           seatRow: tileRow,
           facingDir,
           assigned: false,
+          kind,
         });
         seatCount++;
       }
