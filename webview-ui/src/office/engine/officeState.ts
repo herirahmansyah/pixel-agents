@@ -41,7 +41,12 @@ import type {
 import { CharacterState, Direction, PetState, TILE_SIZE } from '../types.js';
 import { createCharacter, updateCharacter } from './characters.js';
 import { advanceMatrixEffect, startMatrixEffect } from './matrixEffectState.js';
-import { findOfficePath, LOUNGE_TARGETS, WORKSPACE_SEATS } from './office-world.js';
+import {
+  findOfficePath,
+  LOUNGE_TARGETS,
+  PINK_SOFA_SEATS,
+  WORKSPACE_SEATS,
+} from './office-world.js';
 import { createPet, updatePet } from './petEntity.js';
 import { anchorTile, closestFreeSeat } from './seatPlacement.js';
 
@@ -862,7 +867,10 @@ export class OfficeState {
       const existing = ch.loungeSeatId ? this.seats.get(ch.loungeSeatId) : null;
       if (!existing || existing.kind !== LOUNGE_TARGETS || !existing.assigned) {
         this.releaseLoungeReservation(ch);
-        const seat = this.selectLoungeSeat(ch);
+        // Idle agents are forced onto the pink sofa (deterministic pick per
+        // agent id); nearest-lounge is only the fallback when every pink
+        // cushion is taken/unreachable or the layout has no pink sofa.
+        const seat = this.selectPinkSofaSeat(ch) ?? this.selectLoungeSeat(ch);
         if (!seat) return;
         ch.loungeSeatId = seat.uid;
         seat.assigned = true;
@@ -901,7 +909,11 @@ export class OfficeState {
     for (const [uid, seat] of this.seats) {
       if (seat.kind !== LOUNGE_TARGETS) continue;
       if (seat.assigned) continue;
-      if (this.loungeReservations.get(uid) !== undefined && this.loungeReservations.get(uid) !== ch.id) continue;
+      if (
+        this.loungeReservations.get(uid) !== undefined &&
+        this.loungeReservations.get(uid) !== ch.id
+      )
+        continue;
       if (occupied.has(`${seat.seatCol},${seat.seatRow}`)) continue;
 
       const path = this.withTilesUnblocked([`${seat.seatCol},${seat.seatRow}`], () =>
@@ -923,6 +935,45 @@ export class OfficeState {
       }
     }
     return best;
+  }
+
+  /** Force-pick a pink-sofa lounge seat for an idle agent. The agent id
+   *  rotates through PINK_SOFA_SEATS so several idle agents spread across the
+   *  cushions; a taken/unreachable cushion falls through to the next one.
+   *  Returns null when the layout has no pink sofa (or every cushion is
+   *  unusable) so the caller can fall back to nearest-lounge selection. */
+  private selectPinkSofaSeat(ch: Character): Seat | null {
+    const occupied = this.characterOccupiedTiles(ch.id);
+    const count = PINK_SOFA_SEATS.length;
+
+    for (let i = 0; i < count; i++) {
+      const spot = PINK_SOFA_SEATS[(ch.id + i) % count];
+      for (const seat of this.seats.values()) {
+        if (seat.kind !== LOUNGE_TARGETS) continue;
+        if (seat.seatCol !== spot.x || seat.seatRow !== spot.y) continue;
+        if (seat.assigned) continue;
+        if (
+          this.loungeReservations.get(seat.uid) !== undefined &&
+          this.loungeReservations.get(seat.uid) !== ch.id
+        )
+          continue;
+        if (occupied.has(`${seat.seatCol},${seat.seatRow}`)) continue;
+
+        const alreadyThere = ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow;
+        if (alreadyThere) return seat;
+        const path = this.withTilesUnblocked([`${seat.seatCol},${seat.seatRow}`], () =>
+          findOfficePath(
+            { col: ch.tileCol, row: ch.tileRow },
+            { col: seat.seatCol, row: seat.seatRow },
+            this.tileMap,
+            this.blockedTiles,
+            occupied,
+          ),
+        );
+        if (path.length > 0) return seat;
+      }
+    }
+    return null;
   }
 
   private findFreeWorkspaceSeat(ch: Character): Seat | null {
@@ -947,16 +998,14 @@ export class OfficeState {
   private startSeatTransition(ch: Character, seat: Seat): void {
     ch.destinationSeatId = seat.uid;
     const occupied = this.characterOccupiedTiles(ch.id);
-    const path = this.withTilesUnblocked(
-      [`${seat.seatCol},${seat.seatRow}`],
-      () =>
-        findOfficePath(
-          { col: ch.tileCol, row: ch.tileRow },
-          { col: seat.seatCol, row: seat.seatRow },
-          this.tileMap,
-          this.blockedTiles,
-          occupied,
-        ),
+    const path = this.withTilesUnblocked([`${seat.seatCol},${seat.seatRow}`], () =>
+      findOfficePath(
+        { col: ch.tileCol, row: ch.tileRow },
+        { col: seat.seatCol, row: seat.seatRow },
+        this.tileMap,
+        this.blockedTiles,
+        occupied,
+      ),
     );
 
     if (ch.tileCol === seat.seatCol && ch.tileRow === seat.seatRow) {
@@ -1327,7 +1376,15 @@ export class OfficeState {
       }
 
       this.withTilesUnblocked(unblockKeys, () =>
-        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles, occupied),
+        updateCharacter(
+          ch,
+          dt,
+          this.walkableTiles,
+          this.seats,
+          this.tileMap,
+          this.blockedTiles,
+          occupied,
+        ),
       );
 
       const newKey = `${ch.tileCol},${ch.tileRow}`;

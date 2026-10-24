@@ -4,6 +4,17 @@ import type { OfficeTarget, TileType as TileTypeVal } from '../types.js';
 export const LOUNGE_TARGETS: OfficeTarget = 'lounge';
 export const WORKSPACE_SEATS: OfficeTarget = 'workspace';
 
+/** Pink-sofa lounge tiles (the idle rest area). Idle agents are forced onto
+ *  one of these instead of the nearest lounge seat — a deterministic pick
+ *  keyed by agent id so a whole team doesn't pile onto one cushion. */
+export const PINK_SOFA_SEATS: ReadonlyArray<{ x: number; y: number }> = [
+  { x: 13, y: 14 },
+  { x: 13, y: 15 },
+  { x: 16, y: 14 },
+  { x: 16, y: 15 },
+  { x: 14, y: 16 },
+];
+
 export const EMPTY_OCCUPIED: ReadonlySet<string> = Object.freeze(new Set<string>());
 
 export interface OfficePoint {
